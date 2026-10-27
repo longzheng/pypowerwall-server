@@ -1,6 +1,45 @@
 """Control helpers shared by the HTTP API, the MQTT controls and the gateway
 manager (kept here so none of them imports another's module for them)."""
-from typing import Any
+
+import logging
+import threading
+from typing import Any, Callable, Optional
+
+
+class _BatteryDispatchRejection(logging.Handler):
+    """Capture only the current worker's explicit v1r dispatch rejection."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.worker_thread = threading.get_ident()
+        self.reason: Optional[str] = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread == self.worker_thread:
+            message = record.getMessage()
+            if message.startswith("Battery dispatch rejected:"):
+                self.reason = message
+
+
+def call_battery_dispatch(method: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Preserve gateway rejections that pypowerwall 0.22.1 only logs.
+
+    Run inside the executor worker, under the existing write lock. A temporary
+    handler captures only explicit rejections from this thread; unrelated poll
+    errors and transport diagnostics stay in the logs. Remove it when the
+    worker finishes, including after an HTTP timeout or a library exception.
+    """
+    library_logger = logging.getLogger("pypowerwall.tedapi.tedapi_v1r")
+    rejection = _BatteryDispatchRejection()
+    library_logger.addHandler(rejection)
+    try:
+        result = method(*args, **kwargs)
+    finally:
+        library_logger.removeHandler(rejection)
+        rejection.close()
+    if result is None and rejection.reason:
+        return {"error": rejection.reason}
+    return result
 
 
 def is_error_result(result: object) -> bool:

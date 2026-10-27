@@ -2,6 +2,14 @@
 
 ## Version History
 
+### [0.14.0] - Upcoming
+
+**Fixed:**
+- Battery dispatch and resume return the gateway's rejection reason, including
+  its status code, in API errors and the Console instead of a generic command
+  failure. The Console shows returned errors without the duration reminder;
+  network failures and missing acknowledgements retain that guidance.
+
 ### [0.13.0] - 2026-10-26
 
 Local battery dispatch from the API and the Console, a FleetAPI HTTP/1.1

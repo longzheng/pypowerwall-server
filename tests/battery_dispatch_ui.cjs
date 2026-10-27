@@ -129,6 +129,7 @@ function fixture(options = {}) {
     let token = options.token === undefined ? 'test-token' : options.token;
     let forgotten = 0;
     let remembered = '';
+    vm.runInContext(consoleFunction('controlErrorText'), context);
     const controller = context.window.PWBatteryDispatch.create({
         getToken: () => token,
         rememberToken: value => { remembered = value; },
@@ -138,7 +139,7 @@ function fixture(options = {}) {
             if (options.post) return options.post(route, body, auth);
             return { resp: { ok: true, status: 200 }, payload: route === 'resume' ? { resume_battery_operation: true } : body };
         },
-        errorText: (status, payload) => payload?.detail || `Request failed (${status})`,
+        errorText: context.controlErrorText,
         confirmDialog: async details => {
             confirmations.push(details);
             assert.equal(requests.length, 0, 'confirmation precedes the request');
@@ -322,6 +323,21 @@ test('network failure permits resume without resending the dispatch', async () =
     f.controller.setAvailable(true);
     await f.fire('form', 'submit');
     assert.match(f.message, /Network unavailable/);
+    assert.match(f.message, /Check battery power; a dispatch ends when its duration expires/);
     assert.equal(f.elements['control-dispatch-resume'].disabled, false);
     assert.equal(f.requests.length, 1);
 });
+
+for (const release of [false, true]) {
+    test(`gateway rejection is shown without duration guidance (resume: ${release})`, async () => {
+        const detail = 'Battery dispatch rejected: power 15000.000000 exceeds discharge limit 10000 (status code 11)';
+        const f = fixture({ post: async () => ({ resp: { ok: false, status: 503 }, payload: { detail } }) });
+        f.controller.setAvailable(true);
+        await f.fire(release ? 'resume' : 'form', release ? 'click' : 'submit');
+        assert.equal(f.message, detail);
+        assert.match(f.elements['control-dispatch-message'].className, /error/);
+        assert.equal(f.elements['control-dispatch-start'].disabled, false);
+        assert.equal(f.elements['control-dispatch-resume'].disabled, false);
+        assert.equal(f.requests.length, 1);
+    });
+}

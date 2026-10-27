@@ -654,8 +654,18 @@ async def _control_json(path: str, data: dict):
             gateway_id, method, *args, timeout=max(10.0, settings.timeout + 5.0)
         )
         if not isinstance(result, dict) or not result or is_error_result(result):
+            reason = (
+                result.get("error") or result.get("ERROR")
+                if isinstance(result, dict)
+                else None
+            )
             raise HTTPException(
-                status_code=503, detail="Battery dispatch command failed"
+                status_code=503,
+                detail=(
+                    reason
+                    if isinstance(reason, str) and reason
+                    else "Battery dispatch command failed"
+                ),
             )
         return result
 

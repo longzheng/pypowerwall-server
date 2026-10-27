@@ -548,7 +548,10 @@ Success returns `{"power_watts": -500.0, "duration_seconds": 30}` or
 observe the polled `/aggregates` to check battery power. Bad input returns
 400; an unsupported connection, gateway rejection or timeout returns 503.
 JSON errors use `{"detail": ...}`; forms use the proxy's `{"error": ...}`
-and status 400. Both require `PW_CONTROL_SECRET`; an invalid token returns 401.
+and status 400. Gateway rejections include the reason and status code, for example
+`{"detail":"Battery dispatch rejected: power 15000.000000 exceeds discharge limit 10000 (status code 11)"}`.
+Failures without a rejection reason retain the generic command-failure message.
+Both require `PW_CONTROL_SECRET`; an invalid token returns 401.
 Requires pypowerwall 0.22.0 or later. An older library returns a command failure without
 falling back to cloud.
 

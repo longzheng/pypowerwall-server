@@ -83,7 +83,8 @@
                 const { resp, payload } = await post(release ? 'resume' : 'dispatch', body, token);
                 if (!resp.ok || payload?.error || payload?.ERROR) {
                     if (resp.status === 401) onUnauthorized();
-                    throw new Error(errorText(resp.status, payload, 'Battery dispatch request failed.'));
+                    showMessage(errorText(resp.status, payload, 'Battery dispatch request failed.'), 'error');
+                    return;
                 }
                 const acknowledged = release
                     ? payload?.resume_battery_operation === true

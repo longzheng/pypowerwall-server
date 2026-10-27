@@ -1,6 +1,7 @@
 """Local timed battery dispatch, form/JSON parity and failure handling."""
 
 import asyncio
+import logging
 import threading
 from unittest.mock import Mock
 
@@ -218,11 +219,114 @@ def test_missing_ack_is_failure(
     assert r.status_code == (400 if form else 503)
 
 
+@pytest.mark.parametrize("action", ["dispatch", "resume"])
+@pytest.mark.parametrize("form", [False, True])
+@pytest.mark.parametrize(
+    "code,reason,suffix",
+    [
+        (11, "power 15000.000000 exceeds discharge limit 10000", ""),
+        (12, "unsupported command", ", not supported by gateway firmware"),
+    ],
+)
+def test_gateway_rejection_reaches_api(
+    client,
+    connected_gateway,
+    mock_pypowerwall,
+    caplog,
+    action,
+    form,
+    code,
+    reason,
+    suffix,
+):
+    """Use the installed library's real protobuf error handling without I/O."""
+    from pypowerwall.tedapi.tedapi_v1r import TEDAPIv1r, combined_pb2
+
+    from app.core.gateway_manager import gateway_manager
+
+    response = combined_pb2.MessageEnvelope()
+    response.common.error_response.status.code = code
+    response.common.error_response.status.message = reason
+    transport = object.__new__(TEDAPIv1r)
+    transport.send_teg_message = Mock(return_value=response)
+    method = (
+        "dispatch_battery_power" if action == "dispatch" else "resume_battery_operation"
+    )
+    getattr(mock_pypowerwall, method).side_effect = lambda *args: getattr(
+        transport, method
+    )("test-din", *args)
+    library_logger = logging.getLogger("pypowerwall.tedapi.tedapi_v1r")
+    handlers = library_logger.handlers[:]
+
+    result = post(client, action, {"power_watts": 15000, "duration_seconds": 30}, form)
+
+    expected = f"Battery dispatch rejected: {reason} (status code {code}{suffix})"
+    assert result.status_code == (400 if form else 503)
+    assert result.json() == {"error" if form else "detail": expected}
+    assert expected in caplog.text  # Keep the Docker log diagnostic too.
+    assert library_logger.handlers == handlers
+    assert transport.send_teg_message.call_count == 1
+    assert not gateway_manager._cloud_control.method_calls
+
+
+@pytest.mark.parametrize("key", ["error", "ERROR"])
+@pytest.mark.parametrize("form", [False, True])
+def test_library_error_result_preserves_reason(
+    client, connected_gateway, mock_pypowerwall, key, form
+):
+    mock_pypowerwall.dispatch_battery_power.return_value = {key: "Dispatch rejected"}
+    result = post(
+        client, "dispatch", {"power_watts": 500, "duration_seconds": 30}, form
+    )
+    assert result.status_code == (400 if form else 503)
+    assert result.json() == {"error" if form else "detail": "Dispatch rejected"}
+
+
+def test_other_threads_rejections_are_not_exposed(
+    client, connected_gateway, mock_pypowerwall
+):
+    library_logger = logging.getLogger("pypowerwall.tedapi.tedapi_v1r")
+    handlers = library_logger.handlers[:]
+
+    def failed_dispatch(*_args):
+        other_worker = threading.Thread(
+            target=library_logger.error,
+            args=("Battery dispatch rejected: another gateway's error",),
+        )
+        other_worker.start()
+        other_worker.join(timeout=1)
+        assert not other_worker.is_alive()
+        library_logger.error("Battery dispatch failed: private transport diagnostic")
+        return None
+
+    mock_pypowerwall.dispatch_battery_power.side_effect = failed_dispatch
+    result = post(client, "dispatch", {"power_watts": 500, "duration_seconds": 30})
+    assert result.status_code == 503
+    assert result.json() == {"detail": "Battery dispatch command failed"}
+    assert library_logger.handlers == handlers
+
+
+def test_rejection_capture_is_removed_after_exception(
+    client, connected_gateway, mock_pypowerwall
+):
+    library_logger = logging.getLogger("pypowerwall.tedapi.tedapi_v1r")
+    handlers = library_logger.handlers[:]
+    mock_pypowerwall.dispatch_battery_power.side_effect = RuntimeError(
+        "Transport failed"
+    )
+    result = post(client, "dispatch", {"power_watts": 500, "duration_seconds": 30})
+    assert result.status_code == 503
+    assert result.json() == {"detail": "Battery dispatch command failed"}
+    assert library_logger.handlers == handlers
+
+
 @pytest.mark.asyncio
 async def test_resume_waits_for_timed_out_dispatch(connected_gateway, mock_pypowerwall):
     from app.core.gateway_manager import gateway_manager, _WRITE_METHODS
 
     assert {"dispatch_battery_power", "resume_battery_operation"} <= _WRITE_METHODS
+    library_logger = logging.getLogger("pypowerwall.tedapi.tedapi_v1r")
+    handlers = library_logger.handlers[:]
     started, release = threading.Event(), threading.Event()
 
     def slow_dispatch(*_args):
@@ -238,6 +342,7 @@ async def test_resume_waits_for_timed_out_dispatch(connected_gateway, mock_pypow
         )
         assert result is None
         assert started.is_set()
+        assert len(library_logger.handlers) == len(handlers) + 1
         resume = asyncio.create_task(
             gateway_manager.local_control(
                 "test-gateway", "resume_battery_operation", timeout=1
@@ -247,6 +352,7 @@ async def test_resume_waits_for_timed_out_dispatch(connected_gateway, mock_pypow
         mock_pypowerwall.resume_battery_operation.assert_not_called()
         release.set()
         assert await resume == {"resume_battery_operation": True}
+        assert library_logger.handlers == handlers
     finally:
         release.set()
         if resume:

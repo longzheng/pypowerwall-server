@@ -77,7 +77,7 @@ from pypowerwall.tedapi import GW_IP as TEDAPI_GW_IP
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData, AggregateData
 from app.core.scaling import raw_to_tesla_battery_percent
 from app.config import GatewayConfig
-from app.utils.control import is_v1r_gateway
+from app.utils.control import call_battery_dispatch, is_v1r_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -2596,6 +2596,12 @@ class GatewayManager:
             return None
         try:
             method_func = getattr(pw, method)
+
+            def call_method() -> Any:
+                if method in ("dispatch_battery_power", "resume_battery_operation"):
+                    return call_battery_dispatch(method_func, *args, **kwargs)
+                return method_func(*args, **kwargs)
+
             loop = asyncio.get_running_loop()
             if method in _WRITE_METHODS or method in _LOCKED_READS:
                 on_dispatch = None
@@ -2617,14 +2623,10 @@ class GatewayManager:
 
                         future.add_done_callback(clear_after_completion)
 
-                result = await self._locked_call(
-                    lambda: method_func(*args, **kwargs), timeout, on_dispatch
-                )
+                result = await self._locked_call(call_method, timeout, on_dispatch)
             else:
                 result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._executor, lambda: method_func(*args, **kwargs)
-                    ),
+                    loop.run_in_executor(self._executor, call_method),
                     timeout=timeout,
                 )
             # Same read/write split as cloud_control(): polled reads stay
